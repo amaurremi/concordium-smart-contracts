@@ -20,6 +20,7 @@ fn fresh_state() -> AuctionState {
         bids: BTreeMap::new()
     }
 }
+// todo implement proxy bid in which the winner pays the second-highest bid
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReceiveError {
@@ -86,7 +87,7 @@ fn auction_finalize<A: HasActions>(
     if balance == Amount::zero() {
         Ok(A::accept())
     } else {
-        let mut return_action = A::simple_transfer(&owner, balance);
+        let mut return_action = A::simple_transfer(&owner, state.highest_bid);
         let mut remaining_bids = BTreeMap::new();
         // Return bids that are smaller than highest
         for (addr, amnt) in state.bids.iter() {
@@ -201,8 +202,10 @@ mod tests {
 
         // finalizing auction
         ctx4.set_self_balance(highest_bid);
-        let finres2: Result<ActionsTree, _> = auction_finalize(&ctx4, &mut state);
-        finres2.expect("Finalizing auction should work");
+        let finres2: Result<ActionsTree, _> = auction_finalize(&ctx4,  &mut state);
+        let actions = finres2.expect("Finalizing auction should work");
+        assert_eq!(actions, ActionsTree::simple_transfer(&owner, amount2)
+                            .and_then(ActionsTree::simple_transfer(&account1, amount1 + amount1)));
         assert_eq!(state, AuctionState{
             active: false,
             highest_bid: highest_bid,
