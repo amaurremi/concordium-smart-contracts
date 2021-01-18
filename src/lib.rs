@@ -4,23 +4,46 @@ use core::fmt::Debug;
 
 #[contract_state(contract = "auction")]
 #[derive(Debug, Serialize, SchemaType, Eq, PartialEq)]
-pub struct AuctionState {
+pub struct State {
     // Is the auction active?
-    active: bool,
+    auction_state: AuctionState,
+    // The highest bid so far
     highest_bid: Amount,
+    // The sold item
+    item: String,
+    // Expiration time of the auction at which bids will be closed, the winner
+    // pays the highest price, and everyone else gets their money back
+    expiry: Timestamp,
     // Keeping track of which account bid how much money
     #[concordium(map_size_length = 2)]
     bids: BTreeMap<AccountAddress, Amount>,
 }
 
-fn fresh_state() -> AuctionState {
-    AuctionState {
-        active: true,
-        highest_bid: Amount::zero(), // todo: take parameter for highest bid and expiry time
-        bids: BTreeMap::new()
+#[derive(Debug, Serialize, SchemaType, Eq, PartialEq)]
+pub enum AuctionState {
+    ACTIVE,
+    SOLD,
+    EXPIRED,
+}
+
+fn fresh_state(itm: String, exp: Timestamp) -> State {
+    State {
+        auction_state: AuctionState::ACTIVE,
+        highest_bid: Amount::zero(),
+        item: itm,
+        expiry: exp,
+        bids: BTreeMap::new(),
     }
 }
 // todo implement proxy bid in which the winner pays the second-highest bid
+
+#[derive(Serialize)]
+struct InitParameter {
+    item: String,
+    expiry: Timestamp,
+}
+
+// todo custom serialize for initparameter
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReceiveError {
@@ -34,26 +57,27 @@ enum ReceiveError {
 enum FinalizeError {
     SenderMustBeOwner,
     AuctionFinalized,
-    BidMapError
+    BidMapError,
+    AuctionExpired,
 }
 
-// todo: send notification to participants if higher bid received?
+// todo: show better error messages?
+// todo: log when new bids arrive
 
 #[init(contract = "auction")]
-fn auction_init(_ctx: &impl HasInitContext) -> InitResult<AuctionState> {
-
-    Ok(fresh_state())
+fn auction_init(ctx: &impl HasInitContext) -> InitResult<State> {
+    let parameter: InitParameter = ctx.parameter_cursor().get()?;
+    Ok(fresh_state(parameter.item, parameter.expiry))
 }
-// todo: store the thing being auctioned
 
 #[receive(contract = "auction", name = "bid", payable)]
 fn auction_bid<A: HasActions>(
     ctx: &impl HasReceiveContext,
     amount: Amount,
-    state: &mut AuctionState,
+    state: &mut State,
 ) -> Result<A, ReceiveError> {
 
-    ensure!(state.active, ReceiveError::AuctionFinalized);
+    ensure!(state.auction_state == AuctionState::ACTIVE, ReceiveError::AuctionFinalized);
     ensure!(amount.micro_gtu > 0, ReceiveError::ZeroTransfer);
 
     let sender_address = match ctx.sender() {
@@ -74,14 +98,20 @@ fn auction_bid<A: HasActions>(
 #[receive(contract = "auction", name = "finalize")]
 fn auction_finalize<A: HasActions>(
     ctx: &impl HasReceiveContext,
-    state: &mut AuctionState,
+    state: &mut State,
 ) -> Result<A, FinalizeError> {
+
+    let slot_time = ctx.metadata().slot_time();
+    if slot_time > state.expiry {
+        bail!(FinalizeError::AuctionExpired);
+    }
+
     let owner = ctx.owner();
     let sender = ctx.sender();
 
     ensure!(sender.matches_account(&owner), FinalizeError::SenderMustBeOwner);
-    ensure!(state.active, FinalizeError::AuctionFinalized);
-    state.active = false;
+    ensure!(state.auction_state == AuctionState::ACTIVE, FinalizeError::AuctionFinalized);
+    state.auction_state = AuctionState::SOLD;
 
     let balance = ctx.self_balance();
     if balance == Amount::zero() {
@@ -115,6 +145,20 @@ mod tests {
     use super::*;
     use test_infrastructure::*;
 
+    fn dummy_fresh_state() -> State {
+        dummy_state(Amount::zero(), BTreeMap::new())
+    }
+
+    fn dummy_state(highest: Amount, bids: BTreeMap<AccountAddress, Amount>) -> State {
+        State {
+            auction_state: AuctionState::ACTIVE,
+            highest_bid: highest,
+            item: String::from("test"),
+            expiry: Timestamp::from_timestamp_millis(1),
+            bids: bids
+        }
+    }
+
     fn expect_error<E, T>(expr: Result<T, E>, err: E, msg: &str)
         where E: Eq + Debug, T: Debug {
         let actual = expr.expect_err(msg);
@@ -123,11 +167,17 @@ mod tests {
 
     #[test]
     fn test_init() {
-        let ctx = InitContextTest::empty();
+        let mut ctx = InitContextTest::empty();
+        let parameter = InitParameter {
+            item: "test".to_string(),
+            expiry: Timestamp::from_timestamp_millis(1)
+        };
+        let parameter_bytes = to_bytes(&parameter);
+        ctx.set_parameter(&parameter_bytes);
         let state_result = auction_init(&ctx);
         let state = state_result.expect("Contract initialization results in error");
         assert_eq!(state,
-                   fresh_state(),
+                   dummy_fresh_state(),
                    "Auction state should be new after initialization"
         );
     }
@@ -138,18 +188,29 @@ mod tests {
         let account1 = AccountAddress([1u8; 32]);
         let account2 = AccountAddress([2u8; 32]);
 
-        let ctx0 = InitContextTest::empty();
+        let mut ctx0 = InitContextTest::empty();
         let mut ctx1 = ReceiveContextTest::empty();
         let mut ctx2 = ReceiveContextTest::empty();
         let mut ctx3 = ReceiveContextTest::empty();
         let mut ctx4 = ReceiveContextTest::empty();
+        let mut ctx_expired = ReceiveContextTest::empty();
+
+        let parameter = InitParameter {
+            item: "test".to_string(),
+            expiry: Timestamp::from_timestamp_millis(1)
+        };
+        let parameter_bytes = to_bytes(&parameter);
+        ctx0.set_parameter(&parameter_bytes);
 
         ctx1.set_sender(Address::Account(account1));
         ctx2.set_sender(Address::Account(account2));
         ctx3.set_owner(owner);
         ctx3.set_sender(Address::Account(account2));
+        ctx3.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
         ctx4.set_owner(owner);
         ctx4.set_sender(Address::Account(owner));
+        ctx4.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
+        ctx_expired.set_metadata_slot_time(Timestamp::from_timestamp_millis(2));
 
         let amount1 = Amount::from_micro_gtu(100);
         let amount2 = amount1 + amount1 + amount1;
@@ -167,11 +228,7 @@ mod tests {
         // now highest bid should be 100
         bid_map.insert(account1, amount1);
         highest_bid += amount1;
-        assert_eq!(state, AuctionState {
-            active: true,
-            highest_bid: highest_bid,
-            bids: bid_map.clone() // todo bad
-        });
+        assert_eq!(state, dummy_state(highest_bid, bid_map.clone())); // todo bad?
 
         // 2nd bid: account1 bids amount1 again
         // should work even though it's the same amount because account1 simply increases their bid
@@ -179,26 +236,22 @@ mod tests {
         res2.expect("Bidding 2 should pass");
         highest_bid += amount1;
         bid_map.insert(account1, highest_bid);
-        assert_eq!(state, AuctionState{
-            active: true,
-            highest_bid: highest_bid,
-            bids: bid_map.clone() // todo bad
-        });
+        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
 
         // 3rd bid: second account
         let res3: Result<ActionsTree, _> = auction_bid(&ctx2, amount2, &mut state);
         res3.expect("Bidding 3 should pass");
         highest_bid = amount2;
         bid_map.insert(account2, highest_bid);
-        assert_eq!(state, AuctionState{
-            active: true,
-            highest_bid: highest_bid,
-            bids: bid_map.clone() // todo bad
-        });
+        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
 
-        // finalizing auction with wrong owner
+        // trying to finalize auction with wrong owner
         let finres: Result<ActionsTree, _> = auction_finalize(&ctx3, &mut state);
         expect_error(finres, FinalizeError::SenderMustBeOwner, "Finalizing auction should fail with the wrong sender");
+
+        // trying to finalize auction after expiry time
+        let finres: Result<ActionsTree, _> = auction_finalize(&ctx_expired, &mut state);
+        expect_error(finres, FinalizeError::AuctionExpired, "Finalizing auction should fail when it's expired");
 
         // finalizing auction
         ctx4.set_self_balance(highest_bid);
@@ -206,9 +259,11 @@ mod tests {
         let actions = finres2.expect("Finalizing auction should work");
         assert_eq!(actions, ActionsTree::simple_transfer(&owner, amount2)
                             .and_then(ActionsTree::simple_transfer(&account1, amount1 + amount1)));
-        assert_eq!(state, AuctionState{
-            active: false,
+        assert_eq!(state, State{
+            auction_state: AuctionState::SOLD,
             highest_bid: highest_bid,
+            item: "test".to_string(),
+            expiry: Timestamp::from_timestamp_millis(1),
             bids: bid_map.clone() // todo bad
         });
 
@@ -226,10 +281,17 @@ mod tests {
         let account1 = AccountAddress([1u8; 32]);
         let account2 = AccountAddress([2u8; 32]);
         let amount = Amount::from_micro_gtu(100);
-        let ctx0 = InitContextTest::empty();
+        let mut ctx0 = InitContextTest::empty();
         let mut ctx1 = ReceiveContextTest::empty();
         let mut ctx2 = ReceiveContextTest::empty();
         let mut bid_map = BTreeMap::new();
+
+        let parameter = InitParameter {
+            item: "test".to_string(),
+            expiry: Timestamp::from_timestamp_millis(1)
+        };
+        let parameter_bytes = to_bytes(&parameter);
+        ctx0.set_parameter(&parameter_bytes);
 
         ctx1.set_sender(Address::Account(account1));
         ctx2.set_sender(Address::Account(account2));
@@ -244,11 +306,7 @@ mod tests {
         // now highest bid should be amount1
         bid_map.insert(account1, amount);
         highest_bid += amount;
-        assert_eq!(state, AuctionState {
-            active: true,
-            highest_bid: highest_bid,
-            bids: bid_map.clone() // todo bad
-        });
+        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
 
         // 2nd bid: account2 bids amount1
         // should fail because amount is equal to highest bid
@@ -259,9 +317,15 @@ mod tests {
     #[test]
     fn test_auction_bid_zero() {
         let account = AccountAddress([1u8; 32]);
-        let ctx = InitContextTest::empty();
+        let mut ctx = InitContextTest::empty();
         let mut ctx1 = ReceiveContextTest::empty();
         ctx1.set_sender(Address::Account(account));
+        let parameter = InitParameter {
+            item: "test".to_string(),
+            expiry: Timestamp::from_timestamp_millis(1)
+        };
+        let parameter_bytes = to_bytes(&parameter);
+        ctx.set_parameter(&parameter_bytes);
 
         let mut state = auction_init(&ctx).expect("Init results in error");
 
