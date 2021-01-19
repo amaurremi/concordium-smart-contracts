@@ -34,9 +34,8 @@ fn fresh_state(itm: Vec<u8>, exp: Timestamp) -> State {
         bids: BTreeMap::new(),
     }
 }
-// todo implement proxy bid in which the winner pays the second-highest bid
 
-#[derive(Serialize)]
+#[derive(Serialize, SchemaType)]
 struct InitParameter {
     item: Vec<u8>,
     expiry: Timestamp,
@@ -63,7 +62,7 @@ enum FinalizeError {
 
 // todo: log when new bids arrive
 
-#[init(contract = "auction")]
+#[init(contract = "auction", parameter = "InitParameter")]
 fn auction_init(ctx: &impl HasInitContext) -> InitResult<State> {
     let parameter: InitParameter = ctx.parameter_cursor().get()?;
     Ok(fresh_state(parameter.item, parameter.expiry))
