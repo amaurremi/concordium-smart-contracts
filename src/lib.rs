@@ -198,10 +198,11 @@ mod tests {
         (account, ctx)
     }
 
-    fn new_ctx<'a>(owner: AccountAddress, sender: AccountAddress) -> ReceiveContextTest<'a> {
+    fn new_ctx<'a>(owner: AccountAddress, sender: AccountAddress, slot_time: u64) -> ReceiveContextTest<'a> {
         let mut ctx = ReceiveContextTest::empty();
         ctx.set_sender(Address::Account(sender));
         ctx.set_owner(owner);
+        ctx.set_metadata_slot_time(Timestamp::from_timestamp_millis(slot_time));
         ctx
     }
 
@@ -225,66 +226,48 @@ mod tests {
         let parameter_bytes = create_parameter_bytes(&item_expiry_parameter());
         let ctx0 = parametrized_init_ctx(&parameter_bytes);
 
-        let (account1, ctx1) = new_account_ctx();
-        let (account2, ctx2) = new_account_ctx();
-        let mut ctx3 = new_ctx(owner, account2);
-        ctx3.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
-        let mut ctx4 = new_ctx(owner, owner);
-        ctx4.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
-
-        let mut ctx_expired = ReceiveContextTest::empty();
-        ctx_expired.set_metadata_slot_time(Timestamp::from_timestamp_millis(2));
-
-        let amount1 = Amount::from_micro_gtu(100);
-        let amount2 = Amount::from_micro_gtu(300);
-        let amount3 = Amount::from_micro_gtu(600);
+        let amount = Amount::from_micro_gtu(100);
+        let winning_amount = Amount::from_micro_gtu(300);
+        let big_amount = Amount::from_micro_gtu(500);
 
         let mut bid_map = BTreeMap::new();
 
         // initializing auction
         let mut state = auction_init(&ctx0).expect("Initialization should pass");
-        let mut highest_bid = Amount::zero();
 
         // 1st bid: account1 bids amount1
-        let res1: Result<ActionsTree, _> = auction_bid(&ctx1, amount1, &mut state);
-        res1.expect("Bidding 1 should pass");
-        // now highest bid should be 100
-        bid_map.insert(account1, amount1);
-        highest_bid += amount1;
-        assert_eq!(state, dummy_state(highest_bid, bid_map.clone())); // todo bad?
+        let (account1, ctx1) = new_account_ctx();
+        verify_bid(account1, &ctx1, amount, &mut bid_map, &mut state, amount);
 
-        // 2nd bid: account1 bids amount1 again
+        // 2nd bid: account1 bids `amount` again
         // should work even though it's the same amount because account1 simply increases their bid
-        let res2: Result<ActionsTree, _> = auction_bid(&ctx1, amount1, &mut state);
-        res2.expect("Bidding 2 should pass");
-        highest_bid += amount1;
-        bid_map.insert(account1, highest_bid);
-        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
+        verify_bid(account1, &ctx1, amount, &mut bid_map, &mut state, amount + amount);
 
         // 3rd bid: second account
-        let res3: Result<ActionsTree, _> = auction_bid(&ctx2, amount2, &mut state);
-        res3.expect("Bidding 3 should pass");
-        highest_bid = amount2;
-        bid_map.insert(account2, highest_bid);
-        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
+        let (account2, ctx2) = new_account_ctx();
+        verify_bid(account2, &ctx2, winning_amount, &mut bid_map, &mut state, winning_amount);
 
         // trying to finalize auction with wrong owner
+        let ctx3 = new_ctx(owner, account2, 0);
         let finres: Result<ActionsTree, _> = auction_finalize(&ctx3, &mut state);
         expect_error(finres, FinalizeError::SenderMustBeOwner, "Finalizing auction should fail with the wrong sender");
 
         // trying to finalize auction after expiry time
+        let mut ctx_expired = ReceiveContextTest::empty();
+        ctx_expired.set_metadata_slot_time(Timestamp::from_timestamp_millis(2));
         let finres: Result<ActionsTree, _> = auction_finalize(&ctx_expired, &mut state);
         expect_error(finres, FinalizeError::AuctionExpired, "Finalizing auction should fail when it's expired");
 
         // finalizing auction
-        ctx4.set_self_balance(highest_bid);
+        let mut ctx4 = new_ctx(owner, owner, 0);
+        ctx4.set_self_balance(winning_amount);
         let finres2: Result<ActionsTree, _> = auction_finalize(&ctx4,  &mut state);
         let actions = finres2.expect("Finalizing auction should work");
-        assert_eq!(actions, ActionsTree::simple_transfer(&owner, amount2)
-                            .and_then(ActionsTree::simple_transfer(&account1, amount1 + amount1)));
+        assert_eq!(actions, ActionsTree::simple_transfer(&owner, winning_amount)
+                            .and_then(ActionsTree::simple_transfer(&account1, amount + amount)));
         assert_eq!(state, State{
             auction_state: AuctionState::SOLD,
-            highest_bid: highest_bid,
+            highest_bid: winning_amount,
             item: "test".to_string(),
             expiry: Timestamp::from_timestamp_millis(1),
             bids: bid_map.clone() // todo bad
@@ -295,8 +278,22 @@ mod tests {
         expect_error(finres3, FinalizeError::AuctionFinalized, "Finalizing auction a second time should fail");
 
         // attempting to bid again should fail
-        let res4: Result<ActionsTree, _> = auction_bid(&ctx2, amount3, &mut state);
+        let res4: Result<ActionsTree, _> = auction_bid(&ctx2, big_amount, &mut state);
         expect_error(res4, ReceiveError::AuctionFinalized, "Bidding should fail because the auction is finalized");
+    }
+
+    fn verify_bid(
+        account: AccountAddress,
+        ctx: &ContextTest<ReceiveOnlyDataTest>,
+        amount: Amount,
+        bid_map: &mut BTreeMap<AccountAddress, Amount>,
+        mut state: &mut State,
+        highest_bid: Amount,
+    ) {
+        let res: Result<ActionsTree, _> = auction_bid(ctx, amount, &mut state);
+        res.expect("Bidding should pass");
+        bid_map.insert(account, highest_bid);
+        assert_eq!(*state, dummy_state(highest_bid, bid_map.clone()));
     }
 
     #[test]
@@ -313,20 +310,14 @@ mod tests {
 
         // initializing auction
         let mut state = auction_init(&ctx0).expect("Init results in error");
-        let mut highest_bid = Amount::zero();
 
         // 1st bid: account1 bids amount1
-        let res1: Result<ActionsTree, _> = auction_bid(&ctx1, amount, &mut state);
-        res1.expect("Bidding 1 should pass");
-        // now highest bid should be amount1
-        bid_map.insert(account1, amount);
-        highest_bid += amount;
-        assert_eq!(state, dummy_state(highest_bid, bid_map.clone()));
+        verify_bid(account1, &ctx1, amount, &mut bid_map, &mut state, amount);
 
         // 2nd bid: account2 bids amount1
         // should fail because amount is equal to highest bid
         let res2: Result<ActionsTree, _> = auction_bid(&ctx2, amount, &mut state);
-        expect_error(res2, ReceiveError::BidTooLow { bidded: amount, highest_bid: highest_bid }, "Bidding 2 should fail because bidded amount must be higher than highest bid");
+        expect_error(res2, ReceiveError::BidTooLow { bidded: amount, highest_bid: amount }, "Bidding 2 should fail because bidded amount must be higher than highest bid");
     }
 
     #[test]
