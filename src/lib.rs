@@ -11,8 +11,7 @@ pub struct State {
     highest_bid: Amount,
     // The sold item
     item: String,
-    // Expiration time of the auction at which bids will be closed, the winner
-    // pays the highest price, and everyone else gets their money back
+    // Expiration time of the auction at which bids will be closed
     expiry: Timestamp,
     // Keeping track of which account bid how much money
     #[concordium(map_size_length = 2)]
@@ -120,18 +119,18 @@ fn auction_finalize<A: HasActions>(
         let mut return_action = A::simple_transfer(&owner, state.highest_bid);
         let mut remaining_bids = BTreeMap::new();
         // Return bids that are smaller than highest
-        for (addr, amnt) in state.bids.iter() {
-            if *amnt < state.highest_bid {
-                return_action = return_action.and_then(A::simple_transfer(addr, *amnt));
+        for (addr, &amnt) in state.bids.iter() {
+            if amnt < state.highest_bid {
+                return_action = return_action.and_then(A::simple_transfer(addr, amnt));
             } else {
-                remaining_bids.insert(*addr, *amnt);
+                remaining_bids.insert(addr, amnt);
             }
         }
         // Ensure that the only bidder left in the map is the one with the highest bid
         ensure!(remaining_bids.len() == 1, FinalizeError::BidMapError);
         match remaining_bids.iter().next() {
-            Some((_, amount)) => {
-                ensure!(*amount == state.highest_bid, FinalizeError::BidMapError);
+            Some((_, &amount)) => {
+                ensure!(amount == state.highest_bid, FinalizeError::BidMapError);
                 Ok(return_action)
             },
             None =>
@@ -144,6 +143,10 @@ fn auction_finalize<A: HasActions>(
 mod tests {
     use super::*;
     use test_infrastructure::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    // A counter for generating new account addresses
+    static ADDRESS_COUNTER: AtomicU8 = AtomicU8::new(0);
 
     fn dummy_fresh_state() -> State {
         dummy_state(Amount::zero(), BTreeMap::new())
@@ -165,15 +168,48 @@ mod tests {
         assert_eq!(actual, err);
     }
 
-    #[test]
-    fn test_init() {
-        let mut ctx = InitContextTest::empty();
-        let parameter = InitParameter {
+    fn item_expiry_parameter() -> InitParameter {
+        InitParameter {
             item: "test".to_string(),
             expiry: Timestamp::from_timestamp_millis(1)
-        };
-        let parameter_bytes = to_bytes(&parameter);
-        ctx.set_parameter(&parameter_bytes);
+        }
+    }
+
+    fn create_parameter_bytes(parameter: &InitParameter) -> Vec<u8> {
+        to_bytes(parameter)
+    }
+
+    fn parametrized_init_ctx<'a>(parameter_bytes: &'a Vec<u8>) -> InitContextTest<'a> {
+        let mut ctx = InitContextTest::empty();
+        ctx.set_parameter(parameter_bytes);
+        ctx
+    }
+
+    fn new_account() -> AccountAddress {
+        let account = AccountAddress([ADDRESS_COUNTER.load(Ordering::SeqCst); 32]);
+        ADDRESS_COUNTER.fetch_add(1, Ordering::SeqCst);
+        account
+    }
+
+    fn new_account_ctx<'a>() -> (AccountAddress, ReceiveContextTest<'a>) {
+        let account = new_account();
+        let mut ctx = ReceiveContextTest::empty();
+        ctx.set_sender(Address::Account(account));
+        (account, ctx)
+    }
+
+    fn new_ctx<'a>(owner: AccountAddress, sender: AccountAddress) -> ReceiveContextTest<'a> {
+        let mut ctx = ReceiveContextTest::empty();
+        ctx.set_sender(Address::Account(sender));
+        ctx.set_owner(owner);
+        ctx
+    }
+
+    #[test]
+    fn test_init() {
+        let parameter_bytes = create_parameter_bytes(&item_expiry_parameter());
+        let ctx = parametrized_init_ctx(&parameter_bytes);
+
         let state_result = auction_init(&ctx);
         let state = state_result.expect("Contract initialization results in error");
         assert_eq!(state,
@@ -184,37 +220,24 @@ mod tests {
 
     #[test]
     fn test_auction_bid_and_finalize() {
-        let owner = AccountAddress([0u8; 32]);
-        let account1 = AccountAddress([1u8; 32]);
-        let account2 = AccountAddress([2u8; 32]);
+        let owner = new_account();
 
-        let mut ctx0 = InitContextTest::empty();
-        let mut ctx1 = ReceiveContextTest::empty();
-        let mut ctx2 = ReceiveContextTest::empty();
-        let mut ctx3 = ReceiveContextTest::empty();
-        let mut ctx4 = ReceiveContextTest::empty();
-        let mut ctx_expired = ReceiveContextTest::empty();
+        let parameter_bytes = create_parameter_bytes(&item_expiry_parameter());
+        let ctx0 = parametrized_init_ctx(&parameter_bytes);
 
-        let parameter = InitParameter {
-            item: "test".to_string(),
-            expiry: Timestamp::from_timestamp_millis(1)
-        };
-        let parameter_bytes = to_bytes(&parameter);
-        ctx0.set_parameter(&parameter_bytes);
-
-        ctx1.set_sender(Address::Account(account1));
-        ctx2.set_sender(Address::Account(account2));
-        ctx3.set_owner(owner);
-        ctx3.set_sender(Address::Account(account2));
+        let (account1, ctx1) = new_account_ctx();
+        let (account2, ctx2) = new_account_ctx();
+        let mut ctx3 = new_ctx(owner, account2);
         ctx3.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
-        ctx4.set_owner(owner);
-        ctx4.set_sender(Address::Account(owner));
+        let mut ctx4 = new_ctx(owner, owner);
         ctx4.set_metadata_slot_time(Timestamp::from_timestamp_millis(0));
+
+        let mut ctx_expired = ReceiveContextTest::empty();
         ctx_expired.set_metadata_slot_time(Timestamp::from_timestamp_millis(2));
 
         let amount1 = Amount::from_micro_gtu(100);
-        let amount2 = amount1 + amount1 + amount1;
-        let amount3 = amount2 + amount2;
+        let amount2 = Amount::from_micro_gtu(300);
+        let amount3 = Amount::from_micro_gtu(600);
 
         let mut bid_map = BTreeMap::new();
 
@@ -278,23 +301,15 @@ mod tests {
 
     #[test]
     fn test_auction_bid_repeated_bid() {
-        let account1 = AccountAddress([1u8; 32]);
-        let account2 = AccountAddress([2u8; 32]);
+        let (account1, ctx1) = new_account_ctx();
+        let ctx2 = new_account_ctx().1;
+
+        let parameter_bytes = create_parameter_bytes(&item_expiry_parameter());
+        let ctx0 = parametrized_init_ctx(&parameter_bytes);
+
         let amount = Amount::from_micro_gtu(100);
-        let mut ctx0 = InitContextTest::empty();
-        let mut ctx1 = ReceiveContextTest::empty();
-        let mut ctx2 = ReceiveContextTest::empty();
+
         let mut bid_map = BTreeMap::new();
-
-        let parameter = InitParameter {
-            item: "test".to_string(),
-            expiry: Timestamp::from_timestamp_millis(1)
-        };
-        let parameter_bytes = to_bytes(&parameter);
-        ctx0.set_parameter(&parameter_bytes);
-
-        ctx1.set_sender(Address::Account(account1));
-        ctx2.set_sender(Address::Account(account2));
 
         // initializing auction
         let mut state = auction_init(&ctx0).expect("Init results in error");
@@ -316,16 +331,9 @@ mod tests {
 
     #[test]
     fn test_auction_bid_zero() {
-        let account = AccountAddress([1u8; 32]);
-        let mut ctx = InitContextTest::empty();
-        let mut ctx1 = ReceiveContextTest::empty();
-        ctx1.set_sender(Address::Account(account));
-        let parameter = InitParameter {
-            item: "test".to_string(),
-            expiry: Timestamp::from_timestamp_millis(1)
-        };
-        let parameter_bytes = to_bytes(&parameter);
-        ctx.set_parameter(&parameter_bytes);
+        let ctx1 = new_account_ctx().1;
+        let parameter_bytes = create_parameter_bytes(&item_expiry_parameter());
+        let ctx = parametrized_init_ctx(&parameter_bytes);
 
         let mut state = auction_init(&ctx).expect("Init results in error");
 
