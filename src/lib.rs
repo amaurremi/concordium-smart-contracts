@@ -76,7 +76,6 @@ fn auction_bid<A: HasActions>(
     amount: Amount,
     state: &mut State,
 ) -> Result<A, ReceiveError> {
-
     ensure!(state.auction_state != AuctionState::Sold, ReceiveError::AuctionFinalized);
 
     let slot_time = ctx.metadata().slot_time();
@@ -107,7 +106,6 @@ fn auction_finalize<A: HasActions>(
     ctx: &impl HasReceiveContext,
     state: &mut State,
 ) -> Result<A, FinalizeError> {
-
     ensure!(state.auction_state != AuctionState::Sold, FinalizeError::AuctionFinalized);
 
     let slot_time = ctx.metadata().slot_time();
@@ -142,7 +140,7 @@ fn auction_finalize<A: HasActions>(
             Some((_, &amount)) => {
                 ensure!(amount == state.highest_bid, FinalizeError::BidMapError);
                 Ok(return_action)
-            },
+            }
             None =>
                 bail!(FinalizeError::BidMapError)
         }
@@ -169,7 +167,7 @@ mod tests {
             highest_bid: highest,
             item: String::from("test"),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
-            bids: bids
+            bids: bids,
         }
     }
 
@@ -182,7 +180,7 @@ mod tests {
     fn item_expiry_parameter() -> InitParameter {
         InitParameter {
             item: "test".to_string(),
-            expiry: Timestamp::from_timestamp_millis(AUCTION_END)
+            expiry: Timestamp::from_timestamp_millis(AUCTION_END),
         }
     }
 
@@ -260,14 +258,16 @@ mod tests {
         // trying to finalize auction with wrong owner
         let ctx3 = new_ctx(owner, account2, AUCTION_END + 1);
         let finres: Result<ActionsTree, _> = auction_finalize(&ctx3, &mut state);
-        expect_error(finres, FinalizeError::SenderMustBeOwner, "Finalizing auction should fail with the wrong sender");
+        expect_error(finres, FinalizeError::SenderMustBeOwner,
+                     "Finalizing auction should fail with the wrong sender");
 
         // trying to finalize auction that is still active
         // (specifically, the bid is submitted at the last moment, at the AUCTION_END time)
         let mut ctx4 = ReceiveContextTest::empty();
         ctx4.set_metadata_slot_time(Timestamp::from_timestamp_millis(AUCTION_END));
         let finres: Result<ActionsTree, _> = auction_finalize(&ctx4, &mut state);
-        expect_error(finres, FinalizeError::AuctionStillActive, "Finalizing auction should fail when it's before auction-end time");
+        expect_error(finres, FinalizeError::AuctionStillActive,
+                     "Finalizing auction should fail when it's before auction-end time");
 
         // finalizing auction
         let mut ctx5 = new_ctx(owner, owner, AUCTION_END + 1);
@@ -275,22 +275,24 @@ mod tests {
         let finres2: Result<ActionsTree, _> = auction_finalize(&ctx5, &mut state);
         let actions = finres2.expect("Finalizing auction should work");
         assert_eq!(actions, ActionsTree::simple_transfer(&owner, winning_amount)
-                            .and_then(ActionsTree::simple_transfer(&account1, amount + amount)));
-        assert_eq!(state, State{
+            .and_then(ActionsTree::simple_transfer(&account1, amount + amount)));
+        assert_eq!(state, State {
             auction_state: AuctionState::Sold,
             highest_bid: winning_amount,
             item: "test".to_string(),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
-            bids: bid_map.clone() // todo bad
+            bids: bid_map.clone(), // todo bad
         });
 
         // attempting to finalize auction again should fail
         let finres3: Result<ActionsTree, _> = auction_finalize(&ctx5, &mut state);
-        expect_error(finres3, FinalizeError::AuctionFinalized, "Finalizing auction a second time should fail");
+        expect_error(finres3, FinalizeError::AuctionFinalized,
+                     "Finalizing auction a second time should fail");
 
         // attempting to bid again should fail
         let res4: Result<ActionsTree, _> = auction_bid(&ctx2, big_amount, &mut state);
-        expect_error(res4, ReceiveError::AuctionFinalized, "Bidding should fail because the auction is finalized");
+        expect_error(res4, ReceiveError::AuctionFinalized,
+                     "Bidding should fail because the auction is finalized");
     }
 
     fn verify_bid(
@@ -328,7 +330,8 @@ mod tests {
         // 2nd bid: account2 bids amount1
         // should fail because amount is equal to highest bid
         let res2: Result<ActionsTree, _> = auction_bid(&ctx2, amount, &mut state);
-        expect_error(res2, ReceiveError::BidTooLow { bidded: amount, highest_bid: amount }, "Bidding 2 should fail because bidded amount must be higher than highest bid");
+        expect_error(res2, ReceiveError::BidTooLow { bidded: amount, highest_bid: amount },
+                     "Bidding 2 should fail because bidded amount must be higher than highest bid");
     }
 
     #[test]
