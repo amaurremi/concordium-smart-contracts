@@ -7,11 +7,11 @@ use core::fmt::Debug;
 pub struct State {
     // Is the auction active?
     auction_state: AuctionState,
-    // The highest bid so far
+    // The highest bid so far (stored explicitly so that bidders can quickly see it)
     highest_bid: Amount,
-    // The sold item
-    item: String,
-    // Expiration time of the auction at which bids will be closed
+    // The sold item (to be displayed to the auction participatns), encoded as UTF8
+    item: Vec<u8>,
+    // Expiration time of the auction at which bids will be closed (to be displayed to the auction participants)
     expiry: Timestamp,
     // Keeping track of which account bid how much money
     #[concordium(map_size_length = 2)]
@@ -25,7 +25,7 @@ pub enum AuctionState {
     Sold,
 }
 
-fn fresh_state(itm: String, exp: Timestamp) -> State {
+fn fresh_state(itm: Vec<u8>, exp: Timestamp) -> State {
     State {
         auction_state: AuctionState::Active,
         highest_bid: Amount::zero(),
@@ -38,7 +38,7 @@ fn fresh_state(itm: String, exp: Timestamp) -> State {
 
 #[derive(Serialize)]
 struct InitParameter {
-    item: String,
+    item: Vec<u8>,
     expiry: Timestamp,
 }
 
@@ -61,7 +61,6 @@ enum FinalizeError {
     AuctionFinalized,
 }
 
-// todo: show better error messages?
 // todo: log when new bids arrive
 
 #[init(contract = "auction")]
@@ -156,6 +155,7 @@ mod tests {
     // A counter for generating new account addresses
     static ADDRESS_COUNTER: AtomicU8 = AtomicU8::new(0);
     const AUCTION_END: u64 = 1;
+    const ITEM: &str = "Starry night by Van Gogh";
 
     fn dummy_fresh_state() -> State {
         dummy_state(Amount::zero(), BTreeMap::new())
@@ -165,7 +165,7 @@ mod tests {
         State {
             auction_state: AuctionState::Active,
             highest_bid: highest,
-            item: String::from("test"),
+            item: ITEM.as_bytes().to_vec(),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
             bids: bids,
         }
@@ -179,7 +179,7 @@ mod tests {
 
     fn item_expiry_parameter() -> InitParameter {
         InitParameter {
-            item: "test".to_string(),
+            item: ITEM.as_bytes().to_vec(),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
         }
     }
@@ -279,7 +279,7 @@ mod tests {
         assert_eq!(state, State {
             auction_state: AuctionState::Sold,
             highest_bid: winning_amount,
-            item: "test".to_string(),
+            item: ITEM.as_bytes().to_vec(),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
             bids: bid_map.clone(), // todo bad
         });
