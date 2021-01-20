@@ -41,8 +41,6 @@ struct InitParameter {
     expiry: Timestamp,
 }
 
-// todo custom serialize for initparameter
-
 #[derive(Debug, PartialEq, Eq)]
 enum ReceiveError {
     ContractSender,
@@ -54,13 +52,10 @@ enum ReceiveError {
 
 #[derive(Debug, PartialEq, Eq)]
 enum FinalizeError {
-    SenderMustBeOwner,
     BidMapError,
     AuctionStillActive,
     AuctionFinalized,
 }
-
-// todo: log when new bids arrive
 
 #[init(contract = "auction", parameter = "InitParameter")]
 fn auction_init(ctx: &impl HasInitContext) -> InitResult<State> {
@@ -88,7 +83,7 @@ fn auction_bid<A: HasActions>(
         Address::Contract(_) => bail!(ReceiveError::ContractSender),
         Address::Account(account_address) => account_address,
     };
-    let existing_bid = *state.bids.entry(sender_address).or_insert_with(|| Amount::zero()); // todo store u64, not Amount
+    let existing_bid = *state.bids.entry(sender_address).or_insert_with(|| Amount::zero());
 
     let new_bid = existing_bid + amount;
     // Ensure that the new bid exceeds the highest bid so far
@@ -112,9 +107,7 @@ fn auction_finalize<A: HasActions>(
     }
 
     let owner = ctx.owner();
-    let sender = ctx.sender();
 
-    ensure!(sender.matches_account(&owner), FinalizeError::SenderMustBeOwner);
     ensure!(state.auction_state == AuctionState::Active, FinalizeError::AuctionFinalized);
     state.auction_state = AuctionState::Sold;
 
@@ -253,12 +246,6 @@ mod tests {
         // 3rd bid: second account
         let (account2, ctx2) = new_account_ctx();
         verify_bid(account2, &ctx2, winning_amount, &mut bid_map, &mut state, winning_amount);
-
-        // trying to finalize auction with wrong owner
-        let ctx3 = new_ctx(owner, account2, AUCTION_END + 1);
-        let finres: Result<ActionsTree, _> = auction_finalize(&ctx3, &mut state);
-        expect_error(finres, FinalizeError::SenderMustBeOwner,
-                     "Finalizing auction should fail with the wrong sender");
 
         // trying to finalize auction that is still active
         // (specifically, the bid is submitted at the last moment, at the AUCTION_END time)
