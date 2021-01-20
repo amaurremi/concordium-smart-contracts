@@ -9,7 +9,7 @@ pub struct State {
     auction_state: AuctionState,
     // The highest bid so far (stored explicitly so that bidders can quickly see it)
     highest_bid: Amount,
-    // The sold item (to be displayed to the auction participatns), encoded as UTF8
+    // The sold item (to be displayed to the auction participants), encoded in ASCII
     item: Vec<u8>,
     // Expiration time of the auction at which bids will be closed (to be displayed to the auction participants)
     expiry: Timestamp,
