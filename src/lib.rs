@@ -18,11 +18,11 @@ pub struct State {
     bids: BTreeMap<AccountAddress, Amount>,
 }
 
-#[derive(Debug, Serialize, SchemaType, Eq, PartialEq)]
+#[derive(Debug, Serialize, SchemaType, Eq, PartialEq, PartialOrd)]
 pub enum AuctionState {
     Active,
     BidsOverWaitingForAuctionFinalization,
-    Sold,
+    Sold(AccountAddress),
 }
 
 fn fresh_state(itm: Vec<u8>, exp: Timestamp) -> State {
@@ -69,7 +69,7 @@ fn auction_bid<A: HasActions>(
     amount: Amount,
     state: &mut State,
 ) -> Result<A, ReceiveError> {
-    ensure!(state.auction_state != AuctionState::Sold, ReceiveError::AuctionFinalized);
+    ensure!(state.auction_state <= AuctionState::BidsOverWaitingForAuctionFinalization, ReceiveError::AuctionFinalized);
 
     let slot_time = ctx.metadata().slot_time();
     if slot_time > state.expiry {
@@ -99,7 +99,7 @@ fn auction_finalize<A: HasActions>(
     ctx: &impl HasReceiveContext,
     state: &mut State,
 ) -> Result<A, FinalizeError> {
-    ensure!(state.auction_state != AuctionState::Sold, FinalizeError::AuctionFinalized);
+    ensure!(state.auction_state <= AuctionState::BidsOverWaitingForAuctionFinalization, FinalizeError::AuctionFinalized);
 
     let slot_time = ctx.metadata().slot_time();
     if slot_time <= state.expiry {
@@ -109,7 +109,6 @@ fn auction_finalize<A: HasActions>(
     let owner = ctx.owner();
 
     ensure!(state.auction_state == AuctionState::Active, FinalizeError::AuctionFinalized);
-    state.auction_state = AuctionState::Sold;
 
     let balance = ctx.self_balance();
     if balance == Amount::zero() {
@@ -122,6 +121,7 @@ fn auction_finalize<A: HasActions>(
             if amnt < state.highest_bid {
                 return_action = return_action.and_then(A::simple_transfer(addr, amnt));
             } else {
+                state.auction_state = AuctionState::Sold(*addr);
                 remaining_bids.insert(addr, amnt);
             }
         }
@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(actions, ActionsTree::simple_transfer(&owner, winning_amount)
             .and_then(ActionsTree::simple_transfer(&account1, amount + amount)));
         assert_eq!(state, State {
-            auction_state: AuctionState::Sold,
+            auction_state: AuctionState::Sold(account2),
             highest_bid: winning_amount,
             item: ITEM.as_bytes().to_vec(),
             expiry: Timestamp::from_timestamp_millis(AUCTION_END),
