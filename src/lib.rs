@@ -2,6 +2,23 @@ use concordium_std::*;
 use std::collections::btree_map::BTreeMap;
 use core::fmt::Debug;
 
+// Implementation of an auction smart contract
+//
+// To bid, participants send GTU using the bid function.
+// The participant with the highest bid wins the auction.
+// Bids are to be placed before the auction end. After that, bids are refused.
+// Only bids that exceed the highest bid are accepted.
+// Bids are placed incrementally, i.e., an account's bid is considered
+// to be the **sum** of all bids.
+// Example: if Alice first bid 1 GTU and then bid 2 GTU, her total
+// bid is 3 GTU. The bidding will only go through if 3 GTU is higher than
+// the currently highest bid.
+//
+// After the auction end, any account can finalize the auction.
+// The auction can be finalized only once.
+// When the auction is finalized, every participant except the
+// winner gets their money back.
+
 #[contract_state(contract = "auction")]
 #[derive(Debug, Serialize, SchemaType, Eq, PartialEq)]
 pub struct State {
@@ -22,7 +39,7 @@ pub struct State {
 pub enum AuctionState {
     Active,
     BidsOverWaitingForAuctionFinalization,
-    Sold(AccountAddress),
+    Sold(AccountAddress), // winning account's address
 }
 
 fn fresh_state(itm: Vec<u8>, exp: Timestamp) -> State {
@@ -37,24 +54,23 @@ fn fresh_state(itm: Vec<u8>, exp: Timestamp) -> State {
 
 #[derive(Serialize, SchemaType)]
 struct InitParameter {
-    item: Vec<u8>,
-    expiry: Timestamp,
+    item: Vec<u8>, // item to be sold as a sequence of ASCII codes
+    expiry: Timestamp, // time of the auction end
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum ReceiveError {
-    ContractSender,
-    ZeroTransfer,
-    BidTooLow { bidded: Amount, highest_bid: Amount },
-    BidsOverWaitingForAuctionFinalization,
-    AuctionFinalized,
+    ContractSender, // raised if a contract, as opposed to account, tries to bid
+    BidTooLow { bidded: Amount, highest_bid: Amount }, // raised if bid is lower than highest amount
+    BidsOverWaitingForAuctionFinalization, // raised if bid is placed after auction expiry time
+    AuctionFinalized, // raised if bid is placed after auction has been finalized
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum FinalizeError {
-    BidMapError,
-    AuctionStillActive,
-    AuctionFinalized,
+    BidMapError, // raised if there is a mistake in the bid map that keeps track of all accounts' bids
+    AuctionStillActive, // raised if there is an attempt to finalize the auction before its expiry
+    AuctionFinalized, // raised if there is an attempt to finalize an already finalized auction
 }
 
 #[init(contract = "auction", parameter = "InitParameter")]
@@ -76,8 +92,6 @@ fn auction_bid<A: HasActions>(
         state.auction_state = AuctionState::BidsOverWaitingForAuctionFinalization;
         bail!(ReceiveError::BidsOverWaitingForAuctionFinalization);
     }
-
-    ensure!(amount.micro_gtu > 0, ReceiveError::ZeroTransfer);
 
     let sender_address = match ctx.sender() {
         Address::Contract(_) => bail!(ReceiveError::ContractSender),
@@ -329,6 +343,7 @@ mod tests {
         let mut state = auction_init(&ctx).expect("Init results in error");
 
         let res: Result<ActionsTree, _> = auction_bid(&ctx1, Amount::zero(), &mut state);
-        expect_error(res, ReceiveError::ZeroTransfer, "Bidding zero should fail");
+        expect_error(res, ReceiveError::BidTooLow { bidded: Amount::zero(), highest_bid: Amount::zero()},
+                     "Bidding zero should fail");
     }
 }
